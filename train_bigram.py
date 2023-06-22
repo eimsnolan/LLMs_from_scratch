@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# Altered version of : https://www.youtube.com/watch?v=kCc8FmEb1nY&t=1s
+# at timestamp 1hr 24mins
 
 # hyperparameters
 batch_size = 32 # sequences in parralel
