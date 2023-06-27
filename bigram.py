@@ -1,5 +1,4 @@
-from re import L
-from turtle import forward
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -8,66 +7,8 @@ from torch.nn import functional as F
 # at timestamp 1hr 24mins
 # Decoder only transformer, no cross attention or encoder
 
-
-# hyperparameters
-batch_size = 64 # sequences in parralel
-block_size = 256 # context_length
-dropout = 0.2
-max_iters = 5000
-eval_interval = 500
-n_head = 6
-n_layer = 6
-learning_rate = 3e-4 # attention can't deal with a high learning rate wel 
+# device
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 384
-
-torch.manual_seed(1337)
-
-
-with open('input.txt', 'r', encoding='utf-8') as f:
-  text = f.read()
-
-
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-# create a map from chars to integers
-stoi = { ch:i for i,ch in enumerate(chars)}
-itos = { i:ch for  i, ch in enumerate(chars)}
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
-
-# forst 90% wil be train data
-data = torch.tensor(encode(text), dtype = torch.long)
-n= int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
-
-# data loading
-def get_batch(split):
-    # generate small batch of inputs x and outputs y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
-
-# calculate loss
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
 
 
 # self attention 
@@ -77,14 +18,14 @@ class Head(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self, head_size):
+    def __init__(self,  config, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.key = nn.Linear( config.n_embd,  head_size, bias=False)
+        self.query = nn.Linear( config.n_embd,  head_size, bias=False)
+        self.value = nn.Linear( config.n_embd,  head_size, bias=False)
         # tril isnt a parameter of the model so you have to do this
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-        self.dropout = nn.Dropout(dropout)
+        self.register_buffer('tril', torch.tril(torch.ones( config.block_size,  config.block_size)))
+        self.dropout = nn.Dropout( config.dropout)
 
 
     def forward(self, x):
@@ -120,11 +61,12 @@ class MultiHeadAttention(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self, num_heads, head_size):
+    def __init__(self,  config):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(n_embd, n_embd) # part of the skip connections, inof to be projected back in 
-        self.dropout = nn.Dropout(dropout)
+        head_size =  config.n_embd// config.n_head
+        self.heads = nn.ModuleList([Head(config, head_size) for _ in range( config.n_head)])
+        self.proj = nn.Linear( config.n_embd,  config.n_embd) # part of the skip connections, inof to be projected back in 
+        self.dropout = nn.Dropout( config.dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
@@ -132,22 +74,16 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-class FeedForward(nn.Module):
+class MLP(nn.Module):
     """Linear layer followed by a non linearity
-
-    Args:
-        nn (_type_): _description_
-
-    Returns:
-        _type_: _description_
     """
-    def __init__(self, n_embd):
+    def __init__(self,  config):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
+            nn.Linear( config.n_embd, 4 *  config.n_embd),
             nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd), # part of the skip connections, info to be projected back in 
-            nn.Dropout(dropout)
+            nn.Linear(4 *  config.n_embd,  config.n_embd), # part of the skip connections, info to be projected back in 
+            nn.Dropout( config.dropout)
         )
 
     def forward(self, x):
@@ -156,13 +92,12 @@ class FeedForward(nn.Module):
 
 class Block(nn.Module):
     """transformer block, communication followed by computation """
-    def __init__(self, n_embd, n_head):
+    def __init__(self,  config):
         super().__init__()
-        head_size = n_embd//n_head
-        self.sa = MultiHeadAttention(n_head,head_size) # i.e. 4 heads of 8 dimensional self attention
-        self.ffwd = FeedForward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd) # normalises column see LayerNorm1d for eg
-        self.ln2 = nn.LayerNorm(n_embd) # normalises column 
+        self.sa = MultiHeadAttention( config) # i.e. 4 heads of 8 dimensional self attention
+        self.ffwd = MLP( config)
+        self.ln1 = nn.LayerNorm( config.n_embd) # normalises column see LayerNorm1d for eg
+        self.ln2 = nn.LayerNorm( config.n_embd) # normalises column 
 
 
     def forward(self, x):
@@ -173,25 +108,20 @@ class Block(nn.Module):
 
 
 
-
-
 # bigram language model
 class BigramLanguageModel(nn.Module):
 
-    def __init__(self):
+    def __init__(self,  config):
         super().__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        # self.blocks = nn.Sequential(
-        #     Block(n_embd, n_head=4),
-        #     Block(n_embd, n_head=4),
-        #     Block(n_embd, n_head=4),
-        #     nn.LayerNorm(n_embd)
-        # ) # equivalent to below but more messy
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head = n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.token_embedding_table = nn.Embedding( config.vocab_size,  config.n_embd)
+        self.position_embedding_table = nn.Embedding( config.block_size,  config.n_embd)
+        self.blocks = nn.Sequential(*[Block(config) for _ in range( config.n_layer)])
+        self.ln_f = nn.LayerNorm( config.n_embd)
+        self.lm_head = nn.Linear( config.n_embd,  config.vocab_size)
 
 
     def forward(self, idx, targets=None):
@@ -222,7 +152,7 @@ class BigramLanguageModel(nn.Module):
         for _ in range(max_new_tokens):
             # crop idx to make it not more than block size else our positional embeddings
             # table will run out of space 
-            idx_cond = idx[:, -block_size:]
+            idx_cond = idx[:, -self.config.block_size:]
             # get the predictions
             logits, loss = self(idx_cond)
             # focus only on the last time step
@@ -236,32 +166,34 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-model = BigramLanguageModel()
-m = model.to(device)
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+# dataclass of config arguments 
+@dataclass
+class BigramConfig:
+    # hyperparameters
+    batch_size: int = 64 # sequences in parralel
+    block_size: int = 256 # context_length
+    vocab_size:int = 0
+    dropout: float = 0.2
+    max_iters: int = 5000
+    eval_interval: int = 500
+    n_head: int = 6
+    n_layer: int = 6
+    learning_rate: float = 3e-4 # attention can't deal with a high learning rate wel 
+    eval_iters: int = 200
+    n_embd = 384
 
-# create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
-
-# training loop
-for iter in range(max_iters):
-
-    # every onece in a while evaluate loss on train and val sets 
-    if iter % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']}, val loss {losses['val']}")
-
-    # sample a batch of data
-    xb, yb, = get_batch('train')
-
-    # evaluate the loss
-    logits, loss = m(xb, yb)
-    optimizer.zero_grad(set_to_none = True)
-    loss.backward()
-    optimizer.step()
-
-
-
-# generate from the model
-context = torch.zeros((1,1), dtype = torch.long, device = device)
-print(decode(m.generate(context, max_new_tokens = 300)[0].tolist()))
+# dataclass of smaller config arguments for testing on a cpu 
+@dataclass
+class BigramConfigTest:
+  # hyperparameters
+    batch_size: int = 16 # sequences in parralel
+    block_size: int = 32 # context_length
+    vocab_size:int = 0
+    dropout: float = 0.2
+    max_iters: int = 3000
+    eval_interval: int = 100
+    n_head: int = 4
+    n_layer: int = 4
+    learning_rate: float = 1e-3 # attention can't deal with a high learning rate wel 
+    eval_iters: int = 200
+    n_embd = 64
