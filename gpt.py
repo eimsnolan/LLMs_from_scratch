@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -11,25 +12,35 @@ from torch.nn import functional as F
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
+class LayerNorm(nn.Module):
+    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+
 # self attention 
 class Head(nn.Module):
     """one head of self attention
     """
     def __init__(self,  config, head_size):
         super().__init__()
-        self.key = nn.Linear( config.n_embd,  head_size, bias=False)
-        self.query = nn.Linear( config.n_embd,  head_size, bias=False)
-        self.value = nn.Linear( config.n_embd,  head_size, bias=False)
+        self.key = nn.Linear( config.n_embd,  head_size, bias=config.bias)
+        self.query = nn.Linear( config.n_embd,  head_size, bias=config.bias)
+        self.value = nn.Linear( config.n_embd,  head_size, bias=config.bias)
         # tril isnt a parameter of the model so you have to do this
         self.register_buffer('tril', torch.tril(torch.ones( config.block_size,  config.block_size)))
-        self.dropout = nn.Dropout( config.dropout)
+        self.dropout = nn.Dropout(config.dropout)
 
 
     def forward(self, x):
         B, T, C = x.shape # C is attention head size!! 
 
         # let's see a single Head perform self-attention
-        #head_size = 16
         # all the queries dot product with all the keys
         # wei = affinities between keys and queries
         k = self.key(x)   # (B, T, C)
@@ -55,14 +66,14 @@ class Head(nn.Module):
 # still not great results - add mulitple heads of attention!
 class MultiHeadAttention(nn.Module):
     """ adding mulitple heads of attention in parallel
-    Args:
-        nn (_type_): _description_
+
     """
     def __init__(self,  config):
         super().__init__()
         head_size =  config.n_embd// config.n_head
+        assert config.n_embd % config.n_head == 0
         self.heads = nn.ModuleList([Head(config, head_size) for _ in range( config.n_head)])
-        self.proj = nn.Linear( config.n_embd,  config.n_embd) # part of the skip connections, inof to be projected back in 
+        self.proj = nn.Linear( config.n_embd,  config.n_embd, bias=config.bias) # part of the skip connections, inof to be projected back in 
         self.dropout = nn.Dropout( config.dropout)
 
     def forward(self, x):
@@ -75,9 +86,9 @@ class MLP(nn.Module):
     def __init__(self,  config):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear( config.n_embd, 4 *  config.n_embd),
+            nn.Linear( config.n_embd, 4 *  config.n_embd, bias=config.bias),
             nn.GELU(),
-            nn.Linear(4 *  config.n_embd,  config.n_embd), # part of the skip connections, info to be projected back in 
+            nn.Linear(4 *  config.n_embd,  config.n_embd, bias=config.bias), # part of the skip connections, info to be projected back in 
             nn.Dropout( config.dropout)
         )
 
@@ -89,9 +100,9 @@ class Block(nn.Module):
     """transformer block, communication followed by computation """
     def __init__(self,  config):
         super().__init__()
-        self.ln1 = nn.LayerNorm( config.n_embd) # normalises column see LayerNorm1d for eg
+        self.ln1 = LayerNorm(config.n_embd, bias=config.bias)
         self.sa = MultiHeadAttention( config) # i.e. 4 heads of 8 dimensional self attention
-        self.ln2 = nn.LayerNorm( config.n_embd) # normalises column 
+        self.ln2 = LayerNorm( config.n_embd, bias=config.bias) # normalises column 
         self.mlp = MLP(config)
 
 
@@ -111,21 +122,29 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding( config.vocab_size, config.n_embd)
-        self.position_embedding_table = nn.Embedding( config.block_size, config.n_embd)
+        self.token_embedding = nn.Embedding( config.vocab_size, config.n_embd)
+        self.position_embedding = nn.Embedding( config.block_size, config.n_embd)
         self.blocks = nn.Sequential(*[Block(config) for _ in range( config.n_layer)])
-        self.ln_f = nn.LayerNorm( config.n_embd)
-        self.lm_head = nn.Linear( config.n_embd,  config.vocab_size)
+        self.ln_f = LayerNorm( config.n_embd, bias=config.bia)
+        self.lm_head = nn.Linear( config.n_embd,  config.vocab_size, bias=False)
 
         # initialize weights 
         self.apply(self._init_weights)
 
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
         # report number of parameters
         print("number of parameters: %.2fM" % (self.measure_params()/1e6))
 
-    def measure_params(self):
+    def measure_params(self, non_embeddings = True):
         """Calculate number of parameters of the model"""
-        return sum(p.numel() for p in self.parameters())
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embeddings:
+            n_params -= self.position_embedding.weight.numel()
+        return 
 
     def _init_weights(self, module):
         """Initialize weights of layers """
@@ -140,16 +159,15 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B,t) tensor of integers
-        tok_emb = self.token_embedding_table(idx) # (B, T, C = embed C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device = device)) # (T, C)
+        tok_emb = self.token_embedding(idx) # (B, T, C = embed C)
+        pos_emb = self.position_embedding(torch.arange(T, device = device)) # (T, C)
         x = tok_emb + pos_emb
         # adding a block of attention + computation
         x = self.blocks(x) # (B, T, C)
         x = self.ln_f(x) # (B, T, C)
-        # add linear layer
-        logits = self.lm_head(x) # (B, T, vocab size)
 
         if targets is None:
+            logits = self.lm_head(x[:, [-1], :])
             loss = None
         else:
             B,T,C = logits.shape
@@ -200,6 +218,7 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
+    bias: bool = False # for linear and layer norms
 
 
 # dataclass of smaller config arguments for testing on a cpu 
@@ -217,3 +236,4 @@ class GPTConfigTest:
     learning_rate: float = 1e-3 # attention can't deal with a high learning rate wel 
     eval_iters: int = 200
     n_embd = 64
+    bias: bool = False
