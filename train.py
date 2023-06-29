@@ -1,5 +1,11 @@
 from logging import config
+import math
+import time
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 
 from bigram import BigramConfig, BigramConfigTest, BigramLanguageModel
 from gpt import GPTConfig, GPTConfigTest, GPT
@@ -63,8 +69,9 @@ print("basing vocab size of Shakespeare dataset")
 config_args = {}
 config_args['vocab_size'] = vocab_size
 
-#config = BigramConfigTest(**config_args)
-#model = BigramLanguageModel(config)
+
+# config = BigramConfigTest(**config_args)
+# model = BigramLanguageModel(config)
 
 
 config = GPTConfigTest(**config_args)
@@ -72,7 +79,34 @@ model = GPT(config)
 m = model.to(device)
 
 # create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=config.learning_rate)
+optimizer = m.optimizer()
+
+# optimizes model for faster training using compile (torch 2.0)
+def model_compile(model):
+    print('compiling model...')
+    time.tic()
+    model = torch.compile(model)
+    print(f"Compiling mode took: {time.toc()} sec")
+    return model
+
+model = model_compile(model)
+
+# learning rate decay scheduler (cosine with warmup)
+# //TODO check if this is the same as the cosine annealing function in torch 
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < m.config.warmup_iters:
+        return m.config.learning_rate * it / m.config.warmup_iters
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > m.config.lr_decay_iters:
+        return m.config.min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - m.config.warmup_iters) / (m.config.lr_decay_iters - m.config.warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    return m.config.min_lr + coeff * (m.config.learning_rate - m.config.min_lr)
+
+
 
 # training loop
 for iter in range(config.max_iters):
