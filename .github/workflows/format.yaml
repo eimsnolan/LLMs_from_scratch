@@ -12,7 +12,20 @@ jobs:
       - name: Format code with black
         run: |
           pip install black
-          black .
+          black --include="\.py" --exclude="env/*" .
+      - name: Sort imports with isort
+        run: |
+          pip install isort
+          isort .
+      - name: Remove unused imports with autoflake
+        run: |
+          pip install autoflake
+          autoflake --in-place --remove-all-unused-imports --remove-unused-variables --recursive .
+      - name: Linting with pylint
+        run: |
+          python -m pip install --upgrade pip
+          pip install pylint
+          pylint $(git ls-files '*.py')      
       - name: Commit changes
         uses: EndBug/add-and-commit@v4
         with:

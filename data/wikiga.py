@@ -2,7 +2,6 @@
 # website url: https://huggingface.co/datasets/wikipedia
 from datasets import load_dataset
 
-
 wiki_irish = load_dataset(
     "wikipedia", language="ga", date="20230620", beam_runner="DirectRunner"
 )

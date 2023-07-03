@@ -1,169 +1,146 @@
-from dataclasses import dataclass
-import inspect
 import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from typing import Optional, Tuple
+from dataclasses import dataclass
 
-# Altered version of : https://www.youtube.com/watch?v=kCc8FmEb1nY&t=1s
-# at timestamp 1hr 24mins
-# Decoder only transformer, no cross attention or encoder
-
-# device
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
 class LayerNorm(nn.Module):
-    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
-
-    def __init__(self, ndim, bias):
+    """
+    Layer normalization but with an optional bias. 
+    PyTorch doesn't support simply bias=False.
+    """
+    def __init__(self, ndim: int, bias: bool):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim))
         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
-# self attention
 class Head(nn.Module):
-    """one head of self attention"""
-
-    def __init__(self, config, head_size):
+    """
+    One head of self-attention.
+    """
+    def __init__(self, config, head_size: int):
         super().__init__()
         self.key = nn.Linear(config.n_embd, head_size, bias=config.bias)
         self.query = nn.Linear(config.n_embd, head_size, bias=config.bias)
         self.value = nn.Linear(config.n_embd, head_size, bias=config.bias)
-        # tril isnt a parameter of the model so you have to do this
         self.register_buffer(
             "tril", torch.tril(torch.ones(config.block_size, config.block_size))
         )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        B, T, C = x.shape  # C is attention head size!!
-
-        # let's see a single Head perform self-attention
-        # all the queries dot product with all the keys
-        # wei = affinities between keys and queries
-        k = self.key(x)  # (B, T, C)
-        q = self.query(x)  # (B, T, C)
-        # the scaling vector of 1/sqr(head size) is too make sure softmax doesn't turn out to be sharp
-        # from the original attention paper
-        wei = (
-            q @ k.transpose(-2, -1) * C**-0.5
-        )  # (B, T, C) @ (B, C, T) ---> (B, T, T)
-
-        tril = torch.tril(torch.ones(T, T))
-        # this below line doesn't allow all the nodes to talk to each other (auto regressive for text generation)
-        # (nodes from the future can't talk to nodes from the past)
-        # if you want all the nodes to talk to one another e.g. sentiment analysis
-        # then delete this masked_fill line
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
-        wei = F.softmax(wei, dim=-1)  # (B, T, T)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+        wei = q @ k.transpose(-2, -1) * C**-0.5
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
-        # weighted aggregation
-        v = self.value(x)  # (B, T, C) vectors we aggregate, not the raw x tokens
-        out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
+        v = self.value(x)
+        out = wei @ v
         return out
 
 
-# still not great results - add mulitple heads of attention!
 class MultiHeadAttention(nn.Module):
-    """adding mulitple heads of attention in parallel"""
-
+    """
+    Adding multiple heads of attention in parallel.
+    """
     def __init__(self, config):
         super().__init__()
         head_size = config.n_embd // config.n_head
-        assert config.n_embd % config.n_head == 0
+        assert config.n_embd % config.n_head == 0, "Embedding size should be multiple of number of heads."
         self.heads = nn.ModuleList(
             [Head(config, head_size) for _ in range(config.n_head)]
         )
         self.proj = nn.Linear(
             config.n_embd, config.n_embd, bias=config.bias
-        )  # part of the skip connections, inof to be projected back in
+        )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.proj(
-            out
-        )  # part of the skip connections, inof to be projected back in
+        out = self.proj(out)
         return out
 
 
 class MLP(nn.Module):
+    """
+    Simple feed forward network.
+    """
     def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias),
             nn.GELU(),
-            nn.Linear(
-                4 * config.n_embd, config.n_embd, bias=config.bias
-            ),  # part of the skip connections, info to be projected back in
+            nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias),
             nn.Dropout(config.dropout),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
 class Block(nn.Module):
-    """transformer block, communication followed by computation"""
-
+    """
+    Transformer block, communication followed by computation.
+    """
     def __init__(self, config):
         super().__init__()
         self.ln1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.sa = MultiHeadAttention(
-            config
-        )  # i.e. 4 heads of 8 dimensional self attention
-        self.ln2 = LayerNorm(config.n_embd, bias=config.bias)  # normalises column
+        self.sa = MultiHeadAttention(config)
+        self.ln2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        # we're adding x to itself as a skip connection: time 1hr 30 mins
-        x = x + self.sa(self.ln1(x))  # apply one head of self attention (B, T ,C)
-        x = x + self.mlp(self.ln2(x))  # feed forward MLp
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.sa(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
         return x
 
 
-# gpt language model
 class GPT(nn.Module):
+    """
+    GPT language model.
+    """
     def __init__(self, config):
         super().__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
+        assert config.vocab_size is not None, "Vocabulary size must be defined."
+        assert config.block_size is not None, "Block size must be defined."
         self.config = config
-        # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
         self.position_embedding = nn.Embedding(config.block_size, config.n_embd)
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
         self.ln_f = LayerNorm(config.n_embd, bias=config.bias)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # initialize weights
         self.apply(self._init_weights)
 
-        # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
-                )
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
-        # report number of parameters
         params = self.measure_params()
         print(f"number of parameters: {params/1e6} M")
 
-    def measure_params(self, non_embeddings=True):
-        """Calculate number of parameters of the model"""
+    def measure_params(self, non_embeddings=True) -> int:
+        """
+        Calculate number of parameters of the model.
+        """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embeddings:
             n_params -= self.position_embedding.weight.numel()
         return n_params
 
     def _init_weights(self, module):
-        """Initialize weights of layers"""
+        """
+        Initialize weights of layers.
+        """
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0, std=0.2)
             if module.bias is not None:
@@ -171,15 +148,13 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0, std=0.2)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, T = idx.shape
-        # idx and targets are both (B,t) tensor of integers
-        tok_emb = self.token_embedding(idx)  # (B, T, C = embed C)
-        pos_emb = self.position_embedding(torch.arange(T, device=device))  # (T, C)
+        tok_emb = self.token_embedding(idx)
+        pos_emb = self.position_embedding(torch.arange(T, device=device))
         x = tok_emb + pos_emb
-        # adding a block of attention + computation
-        x = self.blocks(x)  # (B, T, C)
-        x = self.ln_f(x)  # (B, T, C)
+        x = self.blocks(x)
+        x = self.ln_f(x)
 
         if targets is None:
             logits = self.lm_head(x[:, [-1], :])
@@ -193,18 +168,14 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    # improve optimizer with warm up scheduler
     def optimizer(self, device_type: str = "cpu"):
-        # refresher here: https://www.analyticsvidhya.com/blog/2021/10/a-comprehensive-guide-on-deep-learning-optimizers/
-        # get all params that require grad
+        """
+        Create an optimizer with warm up scheduler.
+        """
         params = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-
-        # get decay parameters
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
         dict_params_decay = {p for n, p in params.items() if p.dim() >= 2}
         dict_params_non_decay = {p for n, p in params.items() if p.dim() < 2}
 
-        # optim group for adam optimizer
         optim_group = list(
             [
                 {"params": dict_params_decay, "weight_decay": self.config.weight_decay},
@@ -214,14 +185,9 @@ class GPT(nn.Module):
 
         num_decay_params = sum(p.numel() for p in dict_params_decay)
         num_nodecay_params = sum(p.numel() for p in dict_params_non_decay)
-        print(
-            f"num decayed parameter tensors: {len(dict_params_decay)}, with {num_decay_params:,} parameters"
-        )
-        print(
-            f"num non-decayed parameter tensors: {len(dict_params_non_decay)}, with {num_nodecay_params:,} parameters"
-        )
+        print(f"num decayed parameter tensors: {len(dict_params_decay)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(dict_params_non_decay)}, with {num_nodecay_params:,} parameters")
 
-        # check if we can used fused adam (need torch 2.0 and cuda)
         isFused = device_type == "cuda"
 
         optimizer = torch.optim.AdamW(
@@ -233,6 +199,7 @@ class GPT(nn.Module):
         )
 
         return optimizer
+
 
     @classmethod
     def load_pretrained(cls, model_type, override_args):

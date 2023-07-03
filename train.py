@@ -1,17 +1,14 @@
-from contextlib import nullcontext  # used for with commands
-from logging import config
 import math
 import os
 import time
+from contextlib import nullcontext  # used for with commands
+from logging import config
+
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-
-from bigram import BigramConfig, BigramConfigTest, BigramLanguageModel
-from gpt import GPTConfig, GPTConfigTest, GPT
-
+from gpt import GPT, GPTConfigTest
 
 # Altered version of : https://www.youtube.com/watch?v=kCc8FmEb1nY&t=1s
 # at timestamp 1hr 24mins
@@ -20,6 +17,18 @@ from gpt import GPTConfig, GPTConfigTest, GPT
 torch.manual_seed(1337)
 ddp = False
 
+
+# Training loop
+# Training our model consists in repeating the following actions successively for each batch of input data at each epoch:
+
+# Unpack input ids, attentions masks and corresponding target prices,
+# Load these onto the GPU or CPU device,
+# Reset the gradients of the previous training step,
+# Compute the prediction (forward pass),
+# Compute the gradients (backpropagation),
+# Clip gradients to prevent exploding or vanishing gradient issues,
+# Update the model parameters,
+# Adjust the learning rate.
 
 class hardware_setup:
     def __init__(self, ddp):

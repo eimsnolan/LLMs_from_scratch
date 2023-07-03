@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -44,8 +45,6 @@ class Head(nn.Module):
         wei = (
             q @ k.transpose(-2, -1) * C**-0.5
         )  # (B, T, C) @ (B, C, T) ---> (B, T, T)
-
-        tril = torch.tril(torch.ones(T, T))
         # this below line doesn't allow all the nodes to talk to each other (auto regressive for text generation)
         # (nodes from the future can't talk to nodes from the past)
         # if you want all the nodes to talk to one another e.g. sentiment analysis
