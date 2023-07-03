@@ -1,17 +1,20 @@
 import math
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from typing import Optional, Tuple
-from dataclasses import dataclass
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+
 class LayerNorm(nn.Module):
     """
-    Layer normalization but with an optional bias. 
+    Layer normalization but with an optional bias.
     PyTorch doesn't support simply bias=False.
     """
+
     def __init__(self, ndim: int, bias: bool):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim))
@@ -25,6 +28,7 @@ class Head(nn.Module):
     """
     One head of self-attention.
     """
+
     def __init__(self, config, head_size: int):
         super().__init__()
         self.key = nn.Linear(config.n_embd, head_size, bias=config.bias)
@@ -52,16 +56,17 @@ class MultiHeadAttention(nn.Module):
     """
     Adding multiple heads of attention in parallel.
     """
+
     def __init__(self, config):
         super().__init__()
         head_size = config.n_embd // config.n_head
-        assert config.n_embd % config.n_head == 0, "Embedding size should be multiple of number of heads."
+        assert (
+            config.n_embd % config.n_head == 0
+        ), "Embedding size should be multiple of number of heads."
         self.heads = nn.ModuleList(
             [Head(config, head_size) for _ in range(config.n_head)]
         )
-        self.proj = nn.Linear(
-            config.n_embd, config.n_embd, bias=config.bias
-        )
+        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -74,6 +79,7 @@ class MLP(nn.Module):
     """
     Simple feed forward network.
     """
+
     def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
@@ -91,6 +97,7 @@ class Block(nn.Module):
     """
     Transformer block, communication followed by computation.
     """
+
     def __init__(self, config):
         super().__init__()
         self.ln1 = LayerNorm(config.n_embd, bias=config.bias)
@@ -108,6 +115,7 @@ class GPT(nn.Module):
     """
     GPT language model.
     """
+
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None, "Vocabulary size must be defined."
@@ -123,7 +131,9 @@ class GPT(nn.Module):
 
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
+                )
 
         params = self.measure_params()
         print(f"number of parameters: {params/1e6} M")
@@ -148,7 +158,9 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0, std=0.2)
 
-    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, T = idx.shape
         tok_emb = self.token_embedding(idx)
         pos_emb = self.position_embedding(torch.arange(T, device=device))
@@ -185,8 +197,12 @@ class GPT(nn.Module):
 
         num_decay_params = sum(p.numel() for p in dict_params_decay)
         num_nodecay_params = sum(p.numel() for p in dict_params_non_decay)
-        print(f"num decayed parameter tensors: {len(dict_params_decay)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(dict_params_non_decay)}, with {num_nodecay_params:,} parameters")
+        print(
+            f"num decayed parameter tensors: {len(dict_params_decay)}, with {num_decay_params:,} parameters"
+        )
+        print(
+            f"num non-decayed parameter tensors: {len(dict_params_non_decay)}, with {num_nodecay_params:,} parameters"
+        )
 
         isFused = device_type == "cuda"
 
@@ -199,7 +215,6 @@ class GPT(nn.Module):
         )
 
         return optimizer
-
 
     @classmethod
     def load_pretrained(cls, model_type, override_args):

@@ -6,9 +6,8 @@ from logging import config
 
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-
 from gpt import GPT, GPTConfigTest
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # Altered version of : https://www.youtube.com/watch?v=kCc8FmEb1nY&t=1s
 # at timestamp 1hr 24mins
@@ -29,6 +28,7 @@ ddp = False
 # Clip gradients to prevent exploding or vanishing gradient issues,
 # Update the model parameters,
 # Adjust the learning rate.
+
 
 class hardware_setup:
     def __init__(self, ddp):

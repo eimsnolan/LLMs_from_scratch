@@ -1,6 +1,9 @@
-import torch
-from ..models import gpt 
 from types import SimpleNamespace
+
+import torch
+
+from ..models import gpt
+
 
 def test_MLP():
     # setting up a simple config
