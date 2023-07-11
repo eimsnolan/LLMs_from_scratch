@@ -106,7 +106,7 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.sa(self.ln1(x))
+        x = x + self.sa(self.ln1(x)) # residual connection 
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -180,7 +180,7 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    def optimizer(self, device_type: str = "cpu"):
+    def create_optimizer(self, device_type: str = "cpu"):
         """
         Create an optimizer with warm up scheduler.
         """
@@ -362,3 +362,15 @@ class GPTConfigTest:
     weight_decay: float = 1e-1
     beta1: float = 0.9
     beta2: float = 0.95
+    grad_clip: float = 1.0  # clip gradients at this value, or disable if == 0.0
+
+    # speed ups
+    gradient_accum_steps: int = 8
+
+    # learning rate decay settings
+    decay_lr: bool = False  # whether to decay the learning rate
+    warmup_iters: int = 2000  # how many steps to warm up for
+    lr_decay_iters: int = 600000  # should be ~= max_iters per Chinchilla
+    min_lr: float = (
+        6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+    )

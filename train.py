@@ -2,18 +2,19 @@ import math
 import os
 import time
 from contextlib import nullcontext  # used for with commands
-from logging import config
 
 import torch
 import torch.distributed as dist
-from gpt import GPT, GPTConfigTest
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+from models.gpt import GPT, GPTConfigTest
 
 # Altered version of : https://www.youtube.com/watch?v=kCc8FmEb1nY&t=1s
 # at timestamp 1hr 24mins
 # Decoder only transformer, no cross attention or encoder
 
 torch.manual_seed(1337)
+#torch._dynamo.config.verbose=True
 ddp = False
 
 
@@ -29,43 +30,37 @@ ddp = False
 # Update the model parameters,
 # Adjust the learning rate.
 
-
 class hardware_setup:
-    def __init__(self, ddp):
-        (
-            self.master_process,
-            self.seed_offset,
-            self.world_size,
-            self.local_rank,
-            self.device,
-        ) = self.init_distributed(ddp)
+    def __init__(self, ddp, gradient_accum_steps):
+        self.init_distributed(ddp, gradient_accum_steps)
         self.ctx, self.scaler = self.init_amp()
 
-    def init_distributed(self, ddp):
+    def init_distributed(self, ddp, gradient_accum_steps):
         if ddp:
             # only works with torch.distributed.launch // torch.run
-            rank = int(os.environ["RANK"])
-            world_size = int(os.environ["WORLD_SIZE"])
-            local_rank = int(os.environ["LOCAL_RANK"])
+            self.rank = int(os.environ["RANK"])
+            self.world_size = int(os.environ["WORLD_SIZE"])
+            self.local_rank = int(os.environ["LOCAL_RANK"])
 
-            dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+            dist.init_process_group(backend="nccl", world_size=self.world_size, rank=self.rank)
 
             # this will make all .cuda() calls work properly
-            device = f"cuda:{local_rank}"
-            torch.cuda.set_device(device)
-            master_process = (
-                rank == 0
+            self.device = f"cuda:{self.local_rank}"
+            torch.cuda.set_device(self.device)
+            self.master_process = (
+                self.rank == 0
             )  # this process will do logging, checkpointing etc.
-            seed_offset = rank  # each process gets a different seed
+            self.seed_offset = self.rank  # each process gets a different seed
+            assert gradient_accum_steps % self.world_size == 0
+            self.gradient_accum_steps = gradient_accum_steps//self.world_size
 
         else:
             # if not ddp, we are running on a single gpu, and one process
-            master_process = True
-            seed_offset = 0
-            world_size = 1
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.master_process = True
+            self.seed_offset = 0
+            self.world_size = 1
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        return master_process, seed_offset, world_size, local_rank, device
 
     # configuring for automatic mixed precision training, see https://pytorch.org/docs/stable/amp.html
     # note: float16 data type will automatically use a GradScaler
@@ -88,7 +83,7 @@ class hardware_setup:
 
         ctx = (
             nullcontext()
-            if self.device() == "cpu"
+            if self.device == "cpu"
             else torch.amp.autocast(device_type="cuda", dtype=ptdtype)
         )
         scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
@@ -113,7 +108,7 @@ def estimate_loss():
     return out
 
 
-with open("input.txt", "r", encoding="utf-8") as f:
+with open("data/input.txt", "r", encoding="utf-8") as f:
     text = f.read()
 
 chars = sorted(list(set(text)))
@@ -126,10 +121,13 @@ vocab_size = len(chars)
 print("basing vocab size of Shakespeare dataset")
 config_args = {}
 config_args["vocab_size"] = vocab_size
+config = GPTConfigTest(**config_args)
 
 # configuring process and hardware
-hw = hardware_setup(ddp)
-config = GPTConfigTest(**config_args)
+hw = hardware_setup(ddp, config.gradient_accum_steps) # changing gradiant accumulation based on num GUs
+# https://muellerzr.github.io/blog/gradient_accumulation.html
+if ddp: # if we're using mulitple GPUs
+    config.gradient_accum_steps = hw.gradient_accum_steps
 model = GPT(config)
 m = model.to(hw.device)
 
@@ -158,23 +156,22 @@ def get_batch(split):
 
 
 # create a PyTorch optimizer
-optimizer = m.optimizer()
-
-# wrap model into DDP container
-if ddp:
-    model = DDP(model, device_ids=[hw.local_rank])
+optimizer = model.create_optimizer(hw.device)
 
 
 # optimizes model for faster training using compile (torch 2.0)
 def model_compile(model):
     print("compiling model...")
-    time.tic()
+    tic = time.time()
     model = torch.compile(model)
-    print(f"Compiling mode took: {time.toc()} sec")
+    toc = time.time()
+    print(f"Compiling mode took: {toc-tic} sec")
     return model
 
-
-model = model_compile(model)
+# wrap model into DDP container
+if ddp:
+    model = DDP(model, device_ids=[hw.local_rank])
+    model = model_compile(model)
 
 
 # learning rate decay scheduler (cosine with warmup)
@@ -196,9 +193,15 @@ def get_lr(it):
 
 
 # training loop
-for iter in range(config.max_iters):
+for iter in range(1, config.max_iters):
+    # configure learning rate
+        # determine and set the learning rate for this iteration
+    lr = get_lr(iter) if config.decay_lr else config.learning_rate
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+
     # every onece in a while evaluate loss on train and val sets
-    if iter % config.eval_interval == 0:
+    if iter % config.eval_interval == 0 and hw.master_process:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']}, val loss {losses['val']}")
 
@@ -209,10 +212,21 @@ for iter in range(config.max_iters):
     ) = get_batch("train")
 
     # evaluate the loss
-    logits, loss = m(xb, yb)
+    with hw.ctx:
+        logits, loss = model(xb, yb)
+        loss = (
+            loss / config.gradient_accum_steps
+        )  # scale the loss to account for gradient accumulation
+    
+    hw.scaler.scale(loss).backward()
+    # clip the gradient
+    if config.grad_clip != 0.0:
+        hw.scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+    # step the optimizer and scaler if training in fp16
+    hw.scaler.step(optimizer)
+    hw.scaler.update()
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
 
 
 # generate from the model
