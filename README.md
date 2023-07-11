@@ -30,7 +30,7 @@ I welcome contributions to this project. Please feel free to submit issues and p
 
 ## Acknowledgements
 
-Our sincere gratitude to Andrej Karpathy for his inspiring work on nanoGPT and Lightning AI for their work on the lit-llama project. These projects have served as an invaluable resource and starting point for this project.
+Andrej Karpathy for his inspiring work on nanoGPT and Lightning AI for their work on the lit-llama project. These projects have served as an invaluable resource and starting point for this project.
 
 ## License
 
