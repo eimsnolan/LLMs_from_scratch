@@ -1,6 +1,6 @@
 # GPT and Llama Miniatures in Plain Python
 
-This repository is dedicated to the development of miniature, trainable versions of the GPT (Generative Pretrained Transformer) and LLM (LLama Language Models). It's a clean and plain Python implementation, aiming at educational and experimental purposes primarily. My work draws significant inspiration from Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/model.py) and the LLama project from [Lightning AI](https://github.com/Lightning-AI/lit-llama/tree/main).
+This repository is dedicated to the development of miniature, trainable versions of GPT (Generative Pretrained Transformer). It's a clean and plain Python implementation, aiming at educational and experimental purposes primarily. My work draws significant inspiration from Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/model.py) and the LLama project from [Lightning AI](https://github.com/Lightning-AI/lit-llama/tree/main).
 
 ## Features
 
